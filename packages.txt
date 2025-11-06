@@ -1,3 +1,4 @@
 tesseract-ocr
 tesseract-ocr-vie
 poppler-utils
+pytesseract

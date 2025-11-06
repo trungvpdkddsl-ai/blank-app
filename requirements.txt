@@ -1,7 +1,7 @@
 streamlit
 pandas
-google-generativeai
 pdf2image
 openpyxl
 Pillow
 requests
+pytesseract
