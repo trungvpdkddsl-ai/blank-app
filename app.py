@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
-import google.generativeai as genai
+import pytesseract # Dùng OCR cục bộ
 from PIL import Image
 import io
 import re
-from pdf2image import convert_from_bytes
+from pdf2image import convert_from_bytes # Dùng Poppler
 from openpyxl import Workbook
 from openpyxl.styles.numbers import NumberFormat
 
@@ -78,87 +78,6 @@ COLUMN_NAMES_VI = {
     'BB_thoi_han_2': 'Thời hạn SD 2'
 }
 
-def get_gemini_model(api_key):
-    """Khởi tạo và trả về mô hình Gemini."""
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-pro-latest')
-        return model
-    except Exception as e:
-        st.error(f"Lỗi khởi tạo mô hình Gemini: {e}")
-        return None
-
-def extract_information(model, images):
-    """
-    Gửi ảnh đến Gemini và yêu cầu trích xuất thông tin dưới dạng JSON.
-    """
-    prompt = """
-    Bạn là một trợ lý OCR chuyên nghiệp, chuyên trích xuất thông tin từ Giấy chứng nhận quyền sử dụng đất (GCN) của Việt Nam.
-    Hãy phân tích (các) hình ảnh sau và trả về thông tin dưới dạng một đối tượng JSON.
-
-    QUAN TRỌNG:
-    1. Trích xuất TẤT CẢ tên chủ sở hữu.
-    2. Nếu có nhiều chủ sở hữu, hãy trả về `chu_su_dung`, `nam_sinh`, `gioi_tinh`, `cccd` dưới dạng danh sách (array) theo đúng thứ tự.
-    3. Nếu chỉ có 1 chủ sở hữu, vẫn trả về dưới dạng danh sách 1 phần tử.
-    4. Giới tính chỉ ghi "Nam" hoặc "Nữ".
-    5. Ngày cấp GCN trả về định dạng "DD/MM/YYYY" hoặc "MM YYYY".
-    
-    Cấu trúc JSON bắt buộc:
-    {
-      "so_phat_hanh_gcn": "...",
-      "ngay_cap_gcn": "...",
-      "so_vao_so_gcn": "...",
-      "chu_su_dung": ["Tên người 1", "Tên người 2"],
-      "nam_sinh": ["Năm sinh 1", "Năm sinh 2"],
-      "gioi_tinh": ["Nam", "Nữ"],
-      "cccd": ["CCCD 1", "CCCD 2"],
-      "dia_chi_thuong_tru": "...",
-      "ma_dinh_danh_thua_dat": "...",
-      "so_to_ban_do_gcn": "...",
-      "so_thua_dat_gcn": "...",
-      "dia_chi_thua_dat": "...",
-      "dien_tich_thua_dat": "...",
-      "dat_1_loai": "...",
-      "dat_1_dien_tich": "...",
-      "dat_1_nguon_goc": "...",
-      "dat_1_hinh_thuc": "...",
-      "dat_1_thoi_han": "...",
-      "dat_2_loai": "...",
-      "dat_2_dien_tich": "...",
-      "dat_2_nguon_goc": "...",
-      "dat_2_hinh_thuc": "...",
-      "dat_2_thoi_han": "..."
-    }
-    """
-    
-    # Tạo nội dung gửi đi bao gồm prompt và (các) ảnh
-    content = [prompt] + images
-    
-    try:
-        response = model.generate_content(content)
-        raw_text = response.text
-        
-        # --- CẬP NHẬT QUAN TRỌNG ---
-        # Tìm khối JSON đầu tiên trong phản hồi.
-        # AI có thể trả về văn bản giới thiệu (ví dụ: "Chắc chắn rồi...")
-        # nên chúng ta cần tìm đúng đoạn bắt đầu bằng { và kết thúc bằng }
-        json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-        
-        if json_match:
-            cleaned_text = json_match.group(0)
-            # Loại bỏ 'cite:' nếu có
-            cleaned_text = re.sub(r'cite:', '', cleaned_text).strip()
-            return cleaned_text
-        else:
-            # Nếu không tìm thấy JSON, báo lỗi
-            st.error(f"Không tìm thấy khối JSON hợp lệ trong phản hồi của AI. Phản hồi thô: {raw_text}")
-            return None
-            
-    except Exception as e:
-        st.error(f"Lỗi khi gọi API Gemini: {e}")
-        st.error(f"Phản hồi thô từ API (nếu có): {getattr(e, 'response', 'Không có')}")
-        return None
-
 def find_commune_code(address_str):
     """Tìm mã ĐVHC dựa trên địa chỉ đã chuẩn hóa."""
     if not isinstance(address_str, str):
@@ -209,14 +128,89 @@ def fill_hinh_thuc(phap_nhan, hinh_thuc_goc):
             return "Sử dụng chung"
     return hinh_thuc_goc
 
-def process_gemini_output(json_list):
+def extract_information(images):
     """
-    Chuyển đổi danh sách JSON thô từ Gemini thành DataFrame đã qua xử lý.
+    Sử dụng Tesseract để OCR ảnh và bạn phải tự phân tích (parse)
+    văn bản thô để tạo cấu trúc JSON.
+    """
+    
+    # Ghép toàn bộ văn bản từ các trang (ảnh) lại
+    full_raw_text = ""
+    try:
+        for img in images:
+            # lang='vie' để nhận dạng tiếng Việt
+            full_raw_text += pytesseract.image_to_string(img, lang='vie') + "\n"
+    except Exception as e:
+        st.error(f"Lỗi khi chạy Tesseract OCR: {e}")
+        st.error("Hãy đảm bảo Tesseract-OCR đã được cài đặt (trong file packages.txt).")
+        return None
+
+    # --- PHẦN VIỆC CỦA BẠN BẮT ĐẦU TỪ ĐÂY ---
+    #
+    # full_raw_text bây giờ chứa toàn bộ chữ Tesseract đọc được.
+    # Nhiệm vụ của bạn là dùng Regex để tìm và bóc tách thông tin
+    # và tự xây dựng lại đối tượng data giống như Gemini đã làm.
+    #
+    # Đây là ví dụ RẤT ĐƠN GIẢN (sẽ không chạy đúng 100%):
+    
+    st.text_area("Văn bản thô Tesseract đọc được (để gỡ lỗi):", full_raw_text, height=200)
+
+    data = {
+        "so_phat_hanh_gcn": None, "ngay_cap_gcn": None, "so_vao_so_gcn": None,
+        "chu_su_dung": [], "nam_sinh": [], "gioi_tinh": [], "cccd": [],
+        "dia_chi_thuong_tru": None, "ma_dinh_danh_thua_dat": None,
+        "so_to_ban_do_gcn": None, "so_thua_dat_gcn": None,
+        "dia_chi_thua_dat": None, "dien_tich_thua_dat": None,
+        "dat_1_loai": None, "dat_1_dien_tich": None, "dat_1_nguon_goc": None,
+        "dat_1_hinh_thuc": None, "dat_1_thoi_han": None,
+        "dat_2_loai": None, "dat_2_dien_tich": None, "dat_2_nguon_goc": None,
+        "dat_2_hinh_thuc": None, "dat_2_thoi_han": None
+    }
+
+    try:
+        # VÍ DỤ: Tìm tên (chỉ là ví dụ, regex thật phức tạp hơn)
+        # Giả sử tên nằm sau "Ông (Bà):"
+        match_ten = re.search(r'Ông \(Bà\): (.*?)\n', full_raw_text)
+        if match_ten:
+            data['chu_su_dung'] = [match_ten.group(1).strip()]
+        
+        # VÍ DỤ: Tìm năm sinh
+        match_ns = re.search(r'Năm sinh: (\d{4})', full_raw_text)
+        if match_ns:
+            data['nam_sinh'] = [match_ns.group(1).strip()]
+
+        # VÍ DỤ: Tìm CCCD
+        match_cccd = re.search(r'CCCD số: (\d+)', full_raw_text)
+        if match_cccd:
+            data['cccd'] = [match_cccd.group(1).strip()]
+            
+        # VÍ DỤ: Tìm địa chỉ thửa đất
+        match_dc_thua = re.search(r'Thửa đất tại: (.*?)\n', full_raw_text)
+        if match_dc_thua:
+            data['dia_chi_thua_dat'] = match_dc_thua.group(1).strip()
+
+        # ...
+        # BẠN PHẢI TỰ VIẾT RẤT NHIỀU REGEX Ở ĐÂY CHO TẤT CẢ CÁC TRƯỜNG CÒN LẠI
+        # ...
+        
+        st.info("Đã cố gắng phân tích văn bản thô (cần bạn hoàn thiện code).")
+        return data # Trả về dict, không phải JSON string
+
+    except Exception as e:
+        st.error(f"Lỗi khi tự phân tích (parse) văn bản thô: {e}")
+        return None
+    # --- PHẦN VIỆC CỦA BẠN KẾT THÚC Ở ĐÂY ---
+
+
+def process_extracted_output(dict_list):
+    """
+    Chuyển đổi danh sách DICT thô từ OCR thành DataFrame đã qua xử lý.
     Đây là nơi áp dụng TẤT CẢ các quy tắc nghiệp vụ.
+    (Hàm này giữ nguyên logic của bạn)
     """
     all_rows = []
     
-    for data in json_list:
+    for data in dict_list:
         if not data:
             continue
             
@@ -258,6 +252,10 @@ def process_gemini_output(json_list):
             elif num_owners > 2:
                 j_phap_nhan = "hộ gia đình"
                 
+            # Nếu không có chủ nào (do regex hỏng) thì mặc định là 1 hàng
+            if num_owners == 0:
+                num_owners = 1
+
             # Vòng lặp này bây giờ đã an toàn vì num_owners là int
             for i in range(num_owners):
                 # Quy tắc 13: Xác định Vai trò pháp nhân (Cột K)
@@ -324,7 +322,7 @@ def process_gemini_output(json_list):
                 all_rows.append(row)
                 
         except Exception as e:
-            st.warning(f"Lỗi khi xử lý dữ liệu JSON: {e}. Dữ liệu thô: {data}")
+            st.warning(f"Lỗi khi xử lý dữ liệu (sau OCR): {e}. Dữ liệu thô: {data}")
             import traceback
             traceback.print_exc()
 
@@ -333,7 +331,7 @@ def process_gemini_output(json_list):
 
     df = pd.DataFrame(all_rows)
     
-    # --- ÁP DỤNG CÁC QUY TẮC SAU KHI TẠO DF ---
+    # --- ÁP DỤNG CÁC QUY TẮC SAU KHI TẠO DF (Giữ nguyên) ---
 
     for col in FINAL_COLUMNS:
         if col not in df.columns:
@@ -374,11 +372,12 @@ def to_excel(df):
         
         # Quy tắc 15: Định dạng cột CCCD là Text
         if cccd_col_index:
+            # Lấy chữ cái của cột (ví dụ: 'H')
             col_letter = chr(ord('A') + cccd_col_index - 1)
-            text_format = NumberFormat('@')
+            text_format = NumberFormat('@') # Định dạng Text
             
             # Áp dụng định dạng cho tất cả các ô trong cột (trừ header)
-            for cell in worksheet[col_letter][1:]:
+            for cell in worksheet[col_letter][1:]: # Bắt đầu từ hàng 2
                 cell.number_format = text_format
                 
     processed_data = output.getvalue()
@@ -387,11 +386,8 @@ def to_excel(df):
 # --- 2. GIAO DIỆN NGƯỜI DÙNG (STREAMLIT) ---
 
 st.set_page_config(layout="wide")
-st.title("📄 Trình trích xuất thông tin GCN của Anh Trung Đẹp Trai")
-st.write("Ứng dụng này upload file PDF/Ảnh GCN, dùng AI để đọc và áp dụng các quy tắc nghiệp vụ của anh Trung đã định nghĩa, vui lòng mời a cốc bia để sử dụng phần mềm.")
-
-# Nhập API Key
-api_key = st.text_input("Nhập Google AI Studio API Key của bạn:", type="password")
+st.title("📄 Trình trích xuất thông tin GCN (Phiên bản OCR Cục bộ)")
+st.warning("Phiên bản này dùng Tesseract (OCR Cục bộ) và **yêu cầu bạn tự viết logic phân tích văn bản** trong hàm `extract_information`.")
 
 uploaded_files = st.file_uploader(
     "Tải lên file GCN (PDF, PNG, JPG)",
@@ -400,64 +396,59 @@ uploaded_files = st.file_uploader(
 )
 
 if st.button("🚀 Bắt đầu xử lý"):
-    if not api_key:
-        st.error("Vui lòng nhập API Key của Gemini.")
-    elif not uploaded_files:
+    if not uploaded_files:
         st.error("Vui lòng tải lên ít nhất một file.")
     else:
-        model = get_gemini_model(api_key)
-        if model:
-            all_json_results = []
-            progress_bar = st.progress(0)
+        all_dict_results = []
+        progress_bar = st.progress(0)
+        
+        for i, uploaded_file in enumerate(uploaded_files):
+            st.info(f"Đang xử lý file: {uploaded_file.name}...")
             
-            for i, uploaded_file in enumerate(uploaded_files):
-                st.info(f"Đang xử lý file: {uploaded_file.name}...")
+            # Chuyển file sang dạng ảnh PIL
+            images = []
+            try:
+                if uploaded_file.type == "application/pdf":
+                    # Chuyển PDF sang danh sách ảnh
+                    # **ĐÃ XÓA poppler_path** để Streamlit Cloud tự tìm
+                    images = convert_from_bytes(uploaded_file.read())
+                else:
+                    # File ảnh
+                    images = [Image.open(uploaded_file)]
+            except Exception as e:
+                st.error(f"Lỗi khi đọc file {uploaded_file.name}: {e}")
+                st.error("Nếu lỗi Poppler, hãy kiểm tra file 'packages.txt'.")
+                continue
                 
-                # Chuyển file sang dạng ảnh PIL
-                images = []
+            # Gọi hàm OCR cục bộ
+            dict_data = extract_information(images)
+            
+            if dict_data:
                 try:
-                    if uploaded_file.type == "application/pdf":
-                        # Chuyển PDF sang danh sách ảnh
-                        images = convert_from_bytes(uploaded_file.read(), poppler_path="/usr/bin/")
-                    else:
-                        # File ảnh
-                        images = [Image.open(uploaded_file)]
+                    all_dict_results.append(dict_data)
+                    st.success(f"Trích xuất (thô) thành công: {uploaded_file.name}")
                 except Exception as e:
-                    st.error(f"Lỗi khi đọc file {uploaded_file.name}: {e}")
-                    continue
+                    st.error(f"Lỗi khi thêm kết quả: {e}")
                     
-                # Gọi Gemini
-                json_str = extract_information(model, images)
-                
-                if json_str:
-                    try:
-                        # Chuyển đổi chuỗi JSON thành đối tượng Python
-                        json_data = pd.read_json(io.StringIO(json_str), typ='series').to_dict()
-                        all_json_results.append(json_data)
-                        st.success(f"Trích xuất thành công: {uploaded_file.name}")
-                    except Exception as e:
-                        st.error(f"Lỗi khi phân tích JSON từ file {uploaded_file.name}: {e}")
-                        st.text_area("Dữ liệu JSON thô (lỗi)", json_str)
-                        
-                progress_bar.progress((i + 1) / len(uploaded_files))
+            progress_bar.progress((i + 1) / len(uploaded_files))
 
-            if all_json_results:
-                st.header("🔄 Đang áp dụng quy tắc nghiệp vụ...")
-                try:
-                    # Bước quan trọng: Xử lý toàn bộ dữ liệu
-                    final_df = process_gemini_output(all_json_results)
-                    
-                    st.header("✅ Hoàn tất! Xem trước kết quả:")
-                    st.dataframe(final_df)
-                    
-                    # Tạo file Excel để tải về
-                    excel_data = to_excel(final_df)
-                    
-                    st.download_button(
-                        label="📥 Tải về file Excel kết quả",
-                        data=excel_data,
-                        file_name="KetQua_TrichXuat_GCN.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                except Exception as e:
-                    st.error(f"Lỗi nghiêm trọng khi áp dụng quy tắc nghiệp vụ: {e}")
+        if all_dict_results:
+            st.header("🔄 Đang áp dụng quy tắc nghiệp vụ...")
+            try:
+                # Bước quan trọng: Xử lý toàn bộ dữ liệu
+                final_df = process_extracted_output(all_dict_results)
+                
+                st.header("✅ Hoàn tất! Xem trước kết quả:")
+                st.dataframe(final_df)
+                
+                # Tạo file Excel để tải về
+                excel_data = to_excel(final_df)
+                
+                st.download_button(
+                    label="📥 Tải về file Excel kết quả",
+                    data=excel_data,
+                    file_name="KetQua_TrichXuat_GCN_Tesseract.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            except Exception as e:
+                st.error(f"Lỗi nghiêm trọng khi áp dụng quy tắc nghiệp vụ: {e}")
