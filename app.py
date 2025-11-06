@@ -418,7 +418,7 @@ if st.button("🚀 Bắt đầu xử lý"):
                 try:
                     if uploaded_file.type == "application/pdf":
                         # Chuyển PDF sang danh sách ảnh
-                        images = convert_from_bytes(uploaded_file.read())
+                        images = convert_from_bytes(uploaded_file.read(), poppler_path="/usr/bin/")
                     else:
                         # File ảnh
                         images = [Image.open(uploaded_file)]
